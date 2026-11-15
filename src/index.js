@@ -2,14 +2,12 @@
 //   GET /api/spotify/login?key=LINK_KEY -> one-time Spotify link (owner only)
 //   GET /api/spotify/callback           -> Spotify redirects here; stores the refresh token in KV
 //   GET /api/spotify/now                -> public JSON: current track + recently played
-//   GET /api/lastfm/now                 -> public JSON from Last.fm (keeps the API key off the page)
-// Secrets (Settings > Variables and Secrets): SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET, SPOTIFY_LINK_KEY, LASTFM_API_KEY
-// Plain variable: LASTFM_USER
+// Secrets (Settings > Variables and Secrets): SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET, SPOTIFY_LINK_KEY
 import { Hono } from 'hono'
 import { getCookie, setCookie, deleteCookie } from 'hono/cookie'
 
 const SCOPES = 'user-read-currently-playing user-read-recently-played'
-const CACHE_MS = 15_000
+const CACHE_MS = 4_000
 
 const redirectUri = (c) => new URL('/api/spotify/callback', c.req.url).toString()
 const basicAuth = (env) => 'Basic ' + btoa((env.SPOTIFY_CLIENT_ID || '') + ':' + (env.SPOTIFY_CLIENT_SECRET || ''))
@@ -32,7 +30,6 @@ const page = (c, title, msg, status = 200) => c.html(
 // In-memory caches (per isolate; fine if they reset).
 let access = { token: '', exp: 0 }
 let cached = { at: 0, body: null }
-let lfm = { at: 0, body: null }
 
 async function tokenRequest(env, params) {
   const res = await fetch('https://accounts.spotify.com/api/token', {
@@ -114,7 +111,7 @@ app.get('/api/spotify/callback', async (c) => {
 app.get('/api/spotify/now', async (c) => {
   const env = c.env
   c.header('Cache-Control', 'public, max-age=0, must-revalidate')
-  if (cached.body && Date.now() - cached.at < CACHE_MS) return c.json(cached.body)
+  if (cached.body && Date.now() - cached.at < CACHE_MS) return c.json({ ...cached.body, age_ms: Date.now() - cached.at })
   if (!env.SPOTIFY_CLIENT_ID || !env.SPOTIFY_CLIENT_SECRET) return c.json({ linked: false, configured: false })
   try {
     const token = await getAccessToken(env)
@@ -124,51 +121,20 @@ app.get('/api/spotify/now', async (c) => {
       spotify('/me/player/recently-played?limit=5', token)
     ])
     const current = now?.item && now.currently_playing_type === 'track' ? simplify(now.item) : null
-    const history = (recent?.items || []).map((i) => simplify(i.track))
+    const history = (recent?.items || []).map((i) => ({ ...simplify(i.track), playedAt: i.played_at }))
     const body = {
       linked: true,
       playing: Boolean(current && now.is_playing),
       track: current || history[0] || null,
       recent: history.filter((t) => !current || t.url !== current.url).slice(current ? 0 : 1, (current ? 0 : 1) + 3)
     }
+    if (current) { body.progress_ms = now.progress_ms || 0; body.duration_ms = now.item.duration_ms || 0 }
+    else if (history[0]?.playedAt) body.at = Date.parse(history[0].playedAt)
     cached = { at: Date.now(), body }
-    return c.json(body)
+    return c.json({ ...body, age_ms: 0 })
   } catch (e) {
     console.error(e)
-    if (cached.body) return c.json(cached.body)
-    return c.json({ linked: true, error: 'unavailable' }, 502)
-  }
-})
-
-// Last.fm, proxied so the browser only talks to this site (no CORS, no blockers, key stays secret).
-app.get('/api/lastfm/now', async (c) => {
-  const env = c.env
-  c.header('Cache-Control', 'public, max-age=0, must-revalidate')
-  if (!env.LASTFM_API_KEY || !env.LASTFM_USER) return c.json({ linked: false, configured: false })
-  if (lfm.body && Date.now() - lfm.at < CACHE_MS) return c.json(lfm.body)
-  try {
-    const url = 'https://ws.audioscrobbler.com/2.0/?method=user.getrecenttracks&format=json&limit=5' +
-      '&user=' + encodeURIComponent(env.LASTFM_USER) + '&api_key=' + encodeURIComponent(env.LASTFM_API_KEY)
-    const res = await fetch(url)
-    const data = await res.json()
-    if (data.error) return c.json({ linked: false, error: data.message || 'lastfm error' }, 502)
-    const tracks = data.recenttracks?.track || []
-    if (!tracks.length) return c.json({ linked: false })
-    const pick = (x) => ({
-      title: x.name, artist: x.artist?.['#text'] || '',
-      art: ((x.image || []).find((i) => i.size === 'large') || {})['#text'] || '', url: x.url || ''
-    })
-    const first = tracks[0], playing = first['@attr']?.nowplaying === 'true'
-    const body = {
-      linked: true, playing, track: pick(first),
-      at: !playing && first.date ? Number(first.date.uts) * 1000 : null,
-      recent: tracks.slice(1, 4).map(pick)
-    }
-    lfm = { at: Date.now(), body }
-    return c.json(body)
-  } catch (e) {
-    console.error(e)
-    if (lfm.body) return c.json(lfm.body)
+    if (cached.body) return c.json({ ...cached.body, age_ms: Date.now() - cached.at })
     return c.json({ linked: true, error: 'unavailable' }, 502)
   }
 })

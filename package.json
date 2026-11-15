@@ -1,0 +1,11 @@
+{
+  "name": "divinedada",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "hono": "^4.13.18"
+  },
+  "devDependencies": {
+    "wrangler": "^4.162.0"
+  }
+}

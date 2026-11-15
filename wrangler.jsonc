@@ -8,6 +8,6 @@
     "run_worker_first": ["/api/*"]
   },
   "kv_namespaces": [
-    { "binding": "SPOTIFY_KV", "id": "PASTE_KV_NAMESPACE_ID_HERE" }
+    { "binding": "SPOTIFY_KV", "id": "13563aed805b4472aec7c99543d22ce5" }
   ]
 }

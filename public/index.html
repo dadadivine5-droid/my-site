@@ -124,6 +124,14 @@ section.home-sec { padding: 72px 0 8px; }
 .label .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--b); }
 .label .dot.games { background: var(--a); }
 .listen-when { font: 400 12px var(--mono); color: var(--a); margin-top: 2px; }
+.listen-when:empty { display: none; }
+.cur .sp-art { width: 84px; height: 84px; border-radius: 10px; box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45); }
+.sp-info { min-width: 0; flex: 1; }
+.cur .alb { font-size: 12px; opacity: 0.8; }
+.sp-prog { margin-top: 10px; }
+.sp-bar { height: 4px; border-radius: 999px; background: rgba(255, 255, 255, 0.14); overflow: hidden; }
+.sp-bar i { display: block; height: 100%; width: 0; border-radius: inherit; background: #fff; transition: width 0.25s linear; }
+.sp-times { display: flex; justify-content: space-between; font: 400 11px var(--mono); color: var(--muted); margin-top: 5px; font-variant-numeric: tabular-nums; }
 .live { width: 7px; height: 7px; border-radius: 50%; background: var(--a); box-shadow: 0 0 10px var(--a); display: none; }
 .live.on { display: inline-block; }
 .cur { display: flex; gap: 14px; align-items: center; }
@@ -460,9 +468,7 @@ const DATA = {
     }
   },
   /* Listening: the card shows live Spotify data once your account is linked (visit /api/spotify/login?key=YOUR_LINK_KEY
-     on the live site). Last.fm below is an optional fallback. spotifyPlaylistId: paste the ID from a playlist link
-     (open.spotify.com/playlist/THIS_PART) to show a player. */
-  lastfm: { user: "", key: "" }, /* optional browser-only fallback; the /api/lastfm/now route is used first */
+     on the live site). spotifyPlaylistId: paste the ID from a playlist link (open.spotify.com/playlist/THIS_PART) to show a player. */
   spotifyPlaylistId: "",
 
   projects: [
@@ -620,8 +626,8 @@ function nowCard(key, label, isGames) {
 [["games", "Playing", true], ["listening", "Listening"], ["watching", "Watching"], ["reading", "Reading"]]
   .forEach(a => $("nowGrid").append(nowCard(a[0], a[1], a[2])));
 
-/* ---- live listening: polls Last.fm (or Spotify, once linked), shows a running timer and a live "Updated" stamp ---- */
-const LISTEN = { since: 0, at: null, live: false, stamp: 0 };
+/* ---- live listening: Spotify card with real playback position, kept live by polling + interpolation ---- */
+const LISTEN = { live: false, at: null, sig: "", stamp: 0, p: null, lastPoll: 0 };
 const fmtStamp = ms => {
   try { return new Intl.DateTimeFormat("en-CA", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit", timeZone: DATA.tz, timeZoneName: "short" }).format(new Date(ms)); }
   catch (e) { return new Date(ms).toLocaleString(); }
@@ -633,39 +639,56 @@ const fmtAgo = ms => {
   if (s < 86400) return Math.round(s / 3600) + " h ago";
   return Math.round(s / 86400) + " days ago";
 };
+const fmtClock = ms => { const s = Math.max(0, Math.floor(ms / 1000)); return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0"); };
+/* current playback position, interpolated from the last real reading while the song is playing */
+function listenPos() {
+  const p = LISTEN.p;
+  if (!p) return null;
+  return Math.min(p.dur, p.ms + (LISTEN.live ? performance.now() - p.t0 : 0));
+}
 function tickListen() {
   const w = $("listen-when");
-  if (!w || !LISTEN.since) return;
-  if (LISTEN.live) {
-    const s = Math.floor((Date.now() - LISTEN.since) / 1000), m = Math.floor(s / 60);
-    w.textContent = "Listening for " + m + ":" + String(s % 60).padStart(2, "0");
+  if (!w) return;
+  const pos = listenPos();
+  if (pos !== null) {
+    const bar = $("sp-fill"), el1 = $("sp-el");
+    if (bar) bar.style.width = (LISTEN.p.dur ? pos / LISTEN.p.dur * 100 : 0).toFixed(2) + "%";
+    if (el1) el1.textContent = fmtClock(pos);
+    w.textContent = LISTEN.live ? "" : "Paused";
+    if (LISTEN.live && pos >= LISTEN.p.dur - 100 && performance.now() - LISTEN.lastPoll > 2500) pollListening();  /* song ended: fetch the next one now */
   } else w.textContent = LISTEN.at ? "Played " + fmtAgo(Date.now() - LISTEN.at) : "Last played";
 }
-setInterval(tickListen, 1000);
+setInterval(tickListen, 250);
 
-/* Shows a track in the Listening card and the Music scene. t: { title, artist, art, url }, recent: same shape.
-   at: when the track was played (ms), or null when it is playing right now. */
-function showListening(t, recent, live, linkText, at) {
+/* t: { title, artist, album, art, url }, recent: same shape. live: playing right now.
+   at: when it was played (ms) if not live. prog: { ms, dur } from Spotify, if known. */
+function showListening(t, recent, live, linkText, at, prog) {
   const sig = t.title + "|" + t.artist;
-  if (sig !== LISTEN.sig) {                       /* a new song: restart the timer and refresh the Updated stamp */
-    LISTEN.sig = sig; LISTEN.since = live ? Date.now() : (at || Date.now());
-    LISTEN.stamp = live ? Date.now() : (at || Date.now());
+  if (sig !== LISTEN.sig) {                       /* a new song: refresh the Updated stamp */
+    LISTEN.sig = sig; LISTEN.stamp = live ? Date.now() : (at || Date.now());
     $("updated").textContent = "Updated " + fmtStamp(LISTEN.stamp);
-  } else if (live && !LISTEN.live) { LISTEN.since = Date.now(); LISTEN.stamp = Date.now(); $("updated").textContent = "Updated " + fmtStamp(LISTEN.stamp); }
+  } else if (live && !LISTEN.live) { LISTEN.stamp = Date.now(); $("updated").textContent = "Updated " + fmtStamp(LISTEN.stamp); }
   LISTEN.live = !!live; LISTEN.at = at || null;
+  LISTEN.p = prog && prog.dur ? { ms: prog.ms, dur: prog.dur, t0: performance.now() } : null;
   const cur = $("cur-listening");
   cur.innerHTML = "";
+  const info = [el("div", { class: "t", text: t.title }), el("div", { class: "s", text: t.artist })];
+  if (t.album) info.push(el("div", { class: "s alb", text: t.album }));
+  if (LISTEN.p) info.push(el("div", { class: "sp-prog" }, [
+    el("div", { class: "sp-bar" }, [el("i", { id: "sp-fill" })]),
+    el("div", { class: "sp-times" }, [el("span", { id: "sp-el", text: fmtClock(prog.ms) }), el("span", { text: fmtClock(prog.dur) })])
+  ]));
+  info.push(el("div", { class: "s listen-when", id: "listen-when", "aria-live": "off" }));
+  info.push(el("a", { class: "open", target: "_blank", rel: "noopener", text: linkText || "Find on Spotify",
+    href: t.url || "https://open.spotify.com/search/" + encodeURIComponent(t.title + " " + t.artist) }));
   if (t.art) {
-    const a = el("img", { class: "art", src: t.art, alt: "", loading: "lazy" });
+    const a = el("img", { class: "art sp-art", src: t.art, alt: "Album cover for " + (t.album || t.title), loading: "lazy" });
     a.addEventListener("error", () => a.remove());
     cur.append(a);
   }
-  cur.append(el("div", {}, [
-    el("div", { class: "t", text: t.title }), el("div", { class: "s", text: t.artist }),
-    el("div", { class: "s listen-when", id: "listen-when", "aria-live": "off" }),
-    el("a", { class: "open", target: "_blank", rel: "noopener", text: linkText || "Find on Spotify",
-      href: t.url || "https://open.spotify.com/search/" + encodeURIComponent(t.title + " " + t.artist) })
-  ]));
+  cur.append(el("div", { class: "sp-info" }, info));
+  const lab = cur.previousElementSibling;
+  if (lab && lab.lastChild) lab.lastChild.textContent = live ? "Listening to Spotify" : (LISTEN.p ? "Paused on Spotify" : "Last listened on Spotify");
   tickListen();
   $("live-listening").classList.toggle("on", !!live);
   const rec = $("recent-listening"); rec.innerHTML = "";
@@ -678,45 +701,25 @@ function showListening(t, recent, live, linkText, at) {
   rebuildScene("music");
 }
 
-async function loadLastfm() {
-  /* Prefer the site's own /api/lastfm/now (no CORS or blocker problems, key stays on the server). */
-  try {
-    const res = await fetch("/api/lastfm/now", { headers: { accept: "application/json" } });
-    const d = res.ok ? await res.json() : null;
-    if (d && d.linked && d.track) { showListening(d.track, d.recent || [], d.playing, "Find on Spotify", d.at || null); return true; }
-  } catch (e) { /* no backend: try Last.fm directly */ }
-  const c = DATA.lastfm;
-  if (!c || !c.user || !c.key) return false;
-  try {
-    const res = await fetch("https://ws.audioscrobbler.com/2.0/?method=user.getrecenttracks&format=json&limit=5" +
-      "&user=" + encodeURIComponent(c.user) + "&api_key=" + encodeURIComponent(c.key));
-    const data = await res.json();
-    if (data.error) { console.warn("Last.fm:", data.error, data.message); return false; }
-    const tracks = data.recenttracks.track;
-    if (!tracks || !tracks.length) { console.warn("Last.fm: no scrobbles yet"); return false; }
-    const pick = x => ({ title: x.name, artist: x.artist["#text"], art: ((x.image || []).find(i => i.size === "large") || {})["#text"] || "" });
-    const t = tracks[0], live = !!(t["@attr"] && t["@attr"].nowplaying === "true");
-    const at = !live && t.date ? Number(t.date.uts) * 1000 : null;
-    showListening(pick(t), tracks.slice(1, 4).map(pick), live, "Find on Spotify", at);
-    return true;
-  } catch (e) { console.warn("Last.fm failed:", e); return false; }
-}
-
-/* Spotify (once linked through the site's /api/spotify endpoints), else Last.fm, else the static values above. */
+/* Live Spotify through the site's /api/spotify endpoints; the static values above show until it is linked. */
 let spotifyOk = true;
 async function loadSpotify() {
   if (!spotifyOk) return false;
   try {
-    const res = await fetch("/api/spotify/now", { headers: { accept: "application/json" } });
+    const res = await fetch("/api/spotify/now", { headers: { accept: "application/json" }, cache: "no-store" });
     const d = res.ok ? await res.json() : null;
-    if (d && d.linked && d.track) { showListening(d.track, d.recent || [], d.playing, "Open in Spotify", null); return true; }
+    if (d && d.linked && d.track) {
+      const prog = typeof d.progress_ms === "number" && d.duration_ms ? { ms: d.progress_ms + (d.age_ms || 0), dur: d.duration_ms } : null;
+      showListening(d.track, d.recent || [], d.playing, "Open in Spotify", d.at || null, prog);
+      return true;
+    }
   } catch (e) { /* not linked or offline */ }
   spotifyOk = false;
   return false;
 }
-async function pollListening() { if (!(await loadSpotify())) await loadLastfm(); }
+async function pollListening() { LISTEN.lastPoll = performance.now(); await loadSpotify(); }
 pollListening();
-setInterval(() => { if (!document.hidden) pollListening(); }, 20000);
+setInterval(() => { if (!document.hidden) pollListening(); }, 8000);
 document.addEventListener("visibilitychange", () => { if (!document.hidden) pollListening(); });
 
 document.querySelectorAll(".glass").forEach(c => c.addEventListener("pointermove", e => {
